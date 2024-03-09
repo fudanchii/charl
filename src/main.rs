@@ -1,106 +1,51 @@
+use gpiod::{Chip, Lines, Options, Output};
 use std::path::Path;
-use std::{fmt::Write, thread, time::Duration};
-use libgpiod::{line, request::Request, chip::Chip};
+use std::{fmt::Write, io, thread, time::Duration};
 
-const RS_PIN: u32 = 15;
-const RW_PIN: u32 = 14;
-const EN_PIN: u32 = 13;
-const OE_PIN: u32 = 12;
-const D4_PIN: u32 = 11;
-const D5_PIN: u32 = 10;
-const D6_PIN: u32 =  9;
-const D7_PIN: u32 =  8;
-
-static VALUES: &'static [line::Value] = &[line::Value::InActive, line::Value::Active];
+const RS_PIN: u32 = 10; //15;
+const RW_PIN: u32 = 9; //14;
+const EN_PIN: u32 = 11; //13;
+                        // const OE_PIN: u32 = 12;
+const D4_PIN: u32 = 5; //11;
+const D5_PIN: u32 = 6; //10;
+const D6_PIN: u32 = 13; // 9;
+const D7_PIN: u32 = 19; // 8;
 
 struct GpioCharDisplayDriver {
-    chip: Chip,
-    rs: Request,
-    rw: Request,
-    en: Request,
-    data: Request,
+    rs: Lines<Output>,
+    en: Lines<Output>,
+    data: Lines<Output>,
 }
 
 impl GpioCharDisplayDriver {
-    pub fn init<P: AsRef<Path>>(dpath: &P) -> libgpiod::Result<Self> {
-        let mut chip = Chip::open(dpath)?;
+    pub fn init(dpath: impl AsRef<Path>) -> io::Result<Self> {
+        let mut chip = Chip::new(dpath)?;
         let rs = Self::init_output_ctrl(&mut chip, RS_PIN)?;
-        let rw = Self::init_output_ctrl(&mut chip, RW_PIN)?;
+        let _ = Self::init_output_ctrl(&mut chip, RW_PIN)?;
         let en = Self::init_output_ctrl(&mut chip, EN_PIN)?;
         let data = Self::init_data(&mut chip)?;
 
-        Self::init_output_set_active(&mut chip, OE_PIN)?;
-
-        Ok(Self {
-            chip,
-            rs,
-            rw,
-            en,
-            data,
-        })
+        Ok(Self { rs, en, data })
     }
 
-    fn init_output_set_active(chip: &mut Chip, pin: line::Offset) -> libgpiod::Result<()> {
-        let mut line_params = line::Settings::new()?;
-        line_params
-            .set_direction(line::Direction::Output)?
-            .set_bias(Some(line::Bias::Disabled))?
-            .set_drive(line::Drive::PushPull)?;
-
-        let mut line_conf = line::Config::new()?;
-        line_conf.add_line_settings(&[pin], line_params)?;
-
-        let mut request = chip.request_lines(None, &line_conf)?;
-        request.set_value(pin, line::Value::Active)?;
-
-        Ok(())
+    fn init_output_ctrl(chip: &mut Chip, pin: u32) -> io::Result<Lines<Output>> {
+        let opts = Options::output([pin]).values([false]);
+        chip.request_lines(opts)
     }
 
-    fn init_output_ctrl(chip: &mut Chip, pin: line::Offset) -> libgpiod::Result<Request> {
-        let mut line_params = line::Settings::new()?;
-        line_params
-            .set_direction(line::Direction::Output)?
-            .set_bias(Some(line::Bias::Disabled))?
-            .set_drive(line::Drive::PushPull)?
-            .set_output_value(line::Value::InActive)?;
-
-        let mut line_conf = line::Config::new()?;
-        line_conf.add_line_settings(&[pin], line_params)?;
-
-        chip.request_lines(None, &line_conf)
+    fn init_data(chip: &mut Chip) -> io::Result<Lines<Output>> {
+        let opts = Options::output([D7_PIN, D6_PIN, D5_PIN, D4_PIN]).values(0u8);
+        chip.request_lines(opts)
     }
 
-    fn init_data(chip: &mut Chip) -> libgpiod::Result<Request> {
-        let mut line_params = line::Settings::new()?;
-        line_params
-            .set_direction(line::Direction::Output)?
-            .set_bias(Some(line::Bias::Disabled))?
-            .set_drive(line::Drive::PushPull)?
-            .set_output_value(line::Value::InActive)?;
-
-        let mut line_conf = line::Config::new()?;
-        line_conf.add_line_settings(&[D4_PIN, D5_PIN, D6_PIN, D7_PIN], line_params)?;
-
-        chip.request_lines(None, &line_conf)
-    }
-
-    fn write_4bits(&mut self, data: u8) -> libgpiod::Result<()> {
-        let data: usize = data.into();
-        self.data.set_value(D4_PIN, VALUES[data & 1])?;
-        self.data.set_value(D5_PIN, VALUES[(data >> 1) & 1])?;
-        self.data.set_value(D6_PIN, VALUES[(data >> 2) & 1])?;
-        self.data.set_value(D7_PIN, VALUES[(data >> 3) & 1])?;
-        Ok(())
+    fn write_4bits(&mut self, data: u8) -> io::Result<()> {
+        self.data.set_values(data)
     }
 }
 
 impl lcd::Hardware for GpioCharDisplayDriver {
     fn rs(&mut self, hi: bool) {
-        let result = if hi {
-            self.rs.set_value(RS_PIN, line::Value::Active)
-        } else {
-            self.rs.set_value(RS_PIN, line::Value::InActive)
-        };
+        let result = self.rs.set_values([hi]);
 
         if result.is_err() {
             println!("cannot set rs to {:?}: {:?}", hi, result.unwrap_err());
@@ -108,12 +53,7 @@ impl lcd::Hardware for GpioCharDisplayDriver {
     }
 
     fn enable(&mut self, hi: bool) {
-        let result = if hi {
-            self.en.set_value(EN_PIN, line::Value::Active)
-        } else {
-            self.en.set_value(EN_PIN, line::Value::InActive)
-        };
-
+        let result = self.en.set_values([hi]);
         if result.is_err() {
             println!("cannot set en to {:?}: {:?}", hi, result.unwrap_err());
         }
@@ -132,16 +72,16 @@ impl lcd::Delay for GpioCharDisplayDriver {
     }
 }
 
-fn main() -> libgpiod::Result<()> {
-    let device = GpioCharDisplayDriver::init(&"/dev/gpiochip2")?;
+fn main() -> io::Result<()> {
+    let device = GpioCharDisplayDriver::init("gpiochip4")?;
     let mut display = lcd::Display::new(device);
 
     println!("Initializing LCD...");
     display.init(lcd::FunctionLine::Line2, lcd::FunctionDots::Dots5x8);
     println!("LCD ready.");
 
-    write!(&mut display, "Hello, my number today is {: >4}", 42).unwrap();
+    display.position(0, 0);
+    write!(&mut display, "hello, world!").unwrap();
 
     Ok(())
 }
-

@@ -6,5 +6,5 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-libgpiod = { version = "0.2.2", features=["v2_1"] }
+gpiod = "0.2.2"
 lcd = "0.4.1"
