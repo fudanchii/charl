@@ -1,6 +1,12 @@
-use gpiod::{Chip, Lines, Options, Output};
-use std::path::Path;
+use charl::{GpioCharDisplayDriver, PinMap};
+use lcd::{DisplayBlink, DisplayCursor, DisplayMode};
+
 use std::{fmt::Write, io, thread, time::Duration};
+
+use chrono::prelude::*;
+use chrono_tz::Asia::Tokyo;
+
+use systemstat::{saturating_sub_bytes, Platform, System};
 
 const RS_PIN: u32 = 10; //15;
 const RW_PIN: u32 = 9; //14;
@@ -11,77 +17,86 @@ const D5_PIN: u32 = 6; //10;
 const D6_PIN: u32 = 13; // 9;
 const D7_PIN: u32 = 19; // 8;
 
-struct GpioCharDisplayDriver {
-    rs: Lines<Output>,
-    en: Lines<Output>,
-    data: Lines<Output>,
-}
-
-impl GpioCharDisplayDriver {
-    pub fn init(dpath: impl AsRef<Path>) -> io::Result<Self> {
-        let mut chip = Chip::new(dpath)?;
-        let rs = Self::init_output_ctrl(&mut chip, RS_PIN)?;
-        let _ = Self::init_output_ctrl(&mut chip, RW_PIN)?;
-        let en = Self::init_output_ctrl(&mut chip, EN_PIN)?;
-        let data = Self::init_data(&mut chip)?;
-
-        Ok(Self { rs, en, data })
-    }
-
-    fn init_output_ctrl(chip: &mut Chip, pin: u32) -> io::Result<Lines<Output>> {
-        let opts = Options::output([pin]).values([false]);
-        chip.request_lines(opts)
-    }
-
-    fn init_data(chip: &mut Chip) -> io::Result<Lines<Output>> {
-        let opts = Options::output([D7_PIN, D6_PIN, D5_PIN, D4_PIN]).values(0u8);
-        chip.request_lines(opts)
-    }
-
-    fn write_4bits(&mut self, data: u8) -> io::Result<()> {
-        self.data.set_values(data)
-    }
-}
-
-impl lcd::Hardware for GpioCharDisplayDriver {
-    fn rs(&mut self, hi: bool) {
-        let result = self.rs.set_values([hi]);
-
-        if result.is_err() {
-            println!("cannot set rs to {:?}: {:?}", hi, result.unwrap_err());
-        }
-    }
-
-    fn enable(&mut self, hi: bool) {
-        let result = self.en.set_values([hi]);
-        if result.is_err() {
-            println!("cannot set en to {:?}: {:?}", hi, result.unwrap_err());
-        }
-    }
-
-    fn data(&mut self, data: u8) {
-        if let Err(err) = self.write_4bits(data) {
-            println!("cannot write data: {:?}", err);
-        }
-    }
-}
-
-impl lcd::Delay for GpioCharDisplayDriver {
-    fn delay_us(&mut self, delay_usec: u32) {
-        thread::sleep(Duration::from_micros(delay_usec.into()));
-    }
-}
-
 fn main() -> io::Result<()> {
-    let device = GpioCharDisplayDriver::init("gpiochip4")?;
+    let pinmap = PinMap {
+        rs: RS_PIN,
+        rw: RW_PIN,
+        en: EN_PIN,
+        d4: D4_PIN,
+        d5: D5_PIN,
+        d6: D6_PIN,
+        d7: D7_PIN,
+    };
+
+    let device = GpioCharDisplayDriver::init("gpiochip0", pinmap)?;
     let mut display = lcd::Display::new(device);
+
+    let sys = System::new();
 
     println!("Initializing LCD...");
     display.init(lcd::FunctionLine::Line2, lcd::FunctionDots::Dots5x8);
     println!("LCD ready.");
 
-    display.position(0, 0);
-    write!(&mut display, "hello, world!").unwrap();
+    display.display(
+        DisplayMode::DisplayOn,
+        DisplayCursor::CursorOn,
+        DisplayBlink::BlinkOn,
+    );
 
-    Ok(())
+    let mut cpu = sys.cpu_load_aggregate().unwrap();
+    let mut cpu_measurement_counter = 0;
+
+    let mut line3 = "                    ".to_string();
+    let mut line4 = "                    ".to_string();
+
+    loop {
+        let current_time = Utc::now().with_timezone(&Tokyo);
+        display.position(0, 0);
+
+        let line1 = format!(
+            "{}  {}",
+            current_time.format("%Y/%m/%d"),
+            current_time.format("%H:%M:%S")
+        );
+
+        let line2 = format!(
+            "{:<17}{}",
+            current_time.format("%A"),
+            current_time.format("%:::z")
+        );
+
+        if let Ok(mem) = sys.memory() {
+            line3 = format!("{}/{}", saturating_sub_bytes(mem.total, mem.free), mem.free);
+        }
+
+        if cpu_measurement_counter == 0 {
+            if let Ok(load) = cpu.done() {
+                line4 = format!(
+                    "usr:{0:.1}%  sys:{1:.1}%",
+                    load.user * 100.0,
+                    load.system * 100.0
+                );
+            }
+
+            cpu = sys.cpu_load_aggregate().unwrap();
+        }
+
+        write!(&mut display, "{}", line1).unwrap();
+        write!(&mut display, "{:^20}", line3).unwrap();
+        write!(&mut display, "{}", line2).unwrap();
+        write!(&mut display, "{:^20}", line4).unwrap();
+
+        display.display(
+            DisplayMode::DisplayOn,
+            DisplayCursor::CursorOff,
+            DisplayBlink::BlinkOff,
+        );
+
+        cpu_measurement_counter += 1;
+        if cpu_measurement_counter > 5 {
+            cpu_measurement_counter = 0;
+        }
+
+        thread::sleep(Duration::from_millis(200));
+    }
 }
